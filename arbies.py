@@ -2,6 +2,8 @@ import requests
 import time
 from datetime import datetime
 
+# constants
+
 RPC_URL = 'https://eth-mainnet.g.alchemy.com/v2/<REDACTED>'
 
 me = '0xb47A9B6F062c33ED78630478dFf9056687F840f2'
@@ -13,6 +15,7 @@ sushiswap = '0xc3d03e4f041fd4cd388c549ee2a29a9e5075882f'
 shibaswap = '0x8faf958e36c6970497386118030e6297fff8d275'
 croswap = '0x60a26d69263ef43e9a68964ba141263f19d71d51'
 
+# ./Recon.sol
 recon_code = '''
 0x
 608060405234801561000f575f80fd5b506370a0823160e01b5f5273a478c297
@@ -34,6 +37,7 @@ b223fe8d0a0e5c4f27ead9083c756cc25afa50630240bc6b60e21b5f52604061
 24f3fe
 '''.replace('\n', '')
 
+# ./Runner.sol
 runner_code = '''
 0x
 60806040523615610152576000803573c02aaa39b223fe8d0a0e5c4f27ead908
@@ -51,6 +55,7 @@ af958e36c6970497386118030e6297fff8d2756040527360a26d69263ef43e9a
 '''.replace('\n', '')
 
 
+# eth_call's recon contract, decodes, and returns dict
 def recon():
     encoded_recon = requests\
         .post(RPC_URL, json={"id":1,"jsonrpc": "2.0","method":"eth_call","params":[{"data":recon_code}]})\
@@ -93,6 +98,7 @@ def recon():
     ]
 
 
+# packs calldata, constructs state diff for token balances, and simulates a transaction with eth_call
 def run_hypothetical(zero_for_one, amm0, amm1, amount_in, amount0_out, amount1_out):
     zero_for_one = int(zero_for_one)
     amm0 = [uniswap, sushiswap, shibaswap, croswap].index(amm0.get('address'))
@@ -101,7 +107,6 @@ def run_hypothetical(zero_for_one, amm0, amm1, amount_in, amount0_out, amount1_o
     arg1 = hex(amount0_out).replace('0x', '').zfill(64)
     arg2 = hex(amount1_out).replace('0x', '').zfill(64)
     calldata = arg0 + arg1 + arg2
-    print(runner_code)
 
     tx_data = {
             "from": me,
@@ -122,6 +127,7 @@ def run_hypothetical(zero_for_one, amm0, amm1, amount_in, amount0_out, amount1_o
     return tx_res
 
 
+# maps address to name for logs
 def amm_name(amm):
     return {
         uniswap: 'uniswap  ',
@@ -131,34 +137,42 @@ def amm_name(amm):
     }.get(amm.get('address'))
 
 
+# get output from input, reserves, and fee
+# calculates effective price
 def get_amount_out(amount_in, reserve_in, reserve_out, fee):
     amount_in_with_fee = int(amount_in - amount_in * fee // 1000)
     return amount_in_with_fee * reserve_out // (reserve_in + amount_in_with_fee)
 
 
+# simulates a swap with local amm state
 def simswap(amm, zero_for_one, amount_in):
     reserve0, reserve1 = (amm.get('reserve0'), amm.get('reserve1')) if zero_for_one else (amm.get('reserve1'), amm.get('reserve0'))
     return get_amount_out(amount_in, reserve0, reserve1, amm.get('fee'))
 
 
+# simulates a two amm basic arb with simswap, tokenA -> tokenB -> tokenA
 def simarb(primary, secondary, zero_for_one, amount_in):
     return simswap(secondary, not zero_for_one, simswap(primary, zero_for_one, amount_in))
 
 
+# simulates an arb in each direction between one amm and all other_amms with simarb; if profitable, write to a log file
 def find_arb(amm, other_amms, amount_in):
     for other_amm in other_amms:
         amount_out = simarb(amm, other_amm, True, amount_in)
         if amount_out > amount_in:
-            print(f'arb: {amm_name(amm)} -> {amm_name(other_amm)} , (dai -> eth -> dai) , profit {(amount_out - amount_in) / 1e18:.18f} dai , {datetime.now().strftime("%m/%d/%Y:%H:%M:%S")}\n')
-            print(run_hypothetical(False, amm, other_amm, amount_in, simswap(other_amm, False, amount_out), amount_out))
+            with open('log.txt', 'a') as file:
+                file.write(f'arb: {amm_name(amm)} -> {amm_name(other_amm)} , (dai -> eth -> dai) , profit {(amount_out - amount_in) / 1e18:.18f} dai , {datetime.now().strftime("%m/%d/%Y:%H:%M:%S")}\n')
+            # print(run_hypothetical(False, amm, other_amm, amount_in, simswap(other_amm, False, amount_out), amount_out))
         amount_out = simarb(amm, other_amm, False, amount_in)
         if amount_out > amount_in:
-            print(f'arb: {amm_name(amm)} -> {amm_name(other_amm)} , (eth -> dai -> eth) , profit {(amount_out - amount_in) / 1e18:.18f} eth , {datetime.now().strftime("%m/%d/%Y:%H:%M:%S")}\n')
-            print(run_hypothetical(True, amm, other_amm, amount_in, simswap(amm, True, amount_in), amount_out))
+            with open('log.txt', 'a') as file:
+                file.write(f'arb: {amm_name(amm)} -> {amm_name(other_amm)} , (eth -> dai -> eth) , profit {(amount_out - amount_in) / 1e18:.18f} eth , {datetime.now().strftime("%m/%d/%Y:%H:%M:%S")}\n')
+            # print(run_hypothetical(True, amm, other_amm, amount_in, simswap(amm, True, amount_in), amount_out))
 
 
+# gets amm state with recon, runs find_arb on all amm pairs, sleeps for one second, repeats infinitely
 def main():
-    amount_in = 0.01e18
+    amount_in = 0.1e18
     while True:
         amms = recon()
         for amm in amms:
